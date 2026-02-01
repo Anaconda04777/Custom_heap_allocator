@@ -87,14 +87,14 @@ typedef size_t Footer;
 
 // Definition of the Block structure
 typedef struct Block {
-    size_t header; 
+    size_t header;
 
     union {
         struct {
             struct Block *next_free;
             struct Block *prev_free;
         };
-        unsigned char payload[0]; 
+        unsigned char payload[0];
     };
 } Block;
 
@@ -113,5 +113,10 @@ static Block* heap_start = (Block *)heap;
 
 // Array of segregated free lists
 static Block *segregatedLists[NUM_LISTS] = { NULL };
+
+// Gap tracking pointers for non-contiguous sbrk allocations
+// These track the memory gap between the static heap and sbrk-allocated memory
+static unsigned char *gap_start = NULL;  // Start of the gap (end of static heap usage)
+static unsigned char *gap_end = NULL;    // End of the gap (start of sbrk memory)
 
 #endif

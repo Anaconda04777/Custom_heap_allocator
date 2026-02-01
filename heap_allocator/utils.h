@@ -5,6 +5,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <unistd.h>
+#include <stdio.h>
+
 /*
     ------ UTILITY FUNCTIONS USED IN THE PROGRAM -------- 
     Here some utility functions used in the algorithms
@@ -53,6 +55,34 @@ static inline void set_header(Block *b, size_t size, bool used) {
     // Similar to set_size() with the difference that the last flag
     // is chosen on the spot
     b->header = (size & SIZE_MASK) | (used ? 1 : 0);
+}
+
+// -------- Gap checking utility -----------
+
+// Check if an address falls within the gap between static heap and sbrk memory
+static inline bool is_in_gap(void *addr) {
+    if (gap_start == NULL || gap_end == NULL) {
+        return false;  // No gap exists yet
+    }
+    unsigned char *ptr = (unsigned char *)addr;
+    return (ptr >= gap_start && ptr < gap_end);
+}
+
+// Check if a block is in the valid heap region (not in the gap)
+static inline bool is_valid_heap_address(void *addr) {
+    unsigned char *ptr = (unsigned char *)addr;
+    
+    // Must be within overall heap bounds
+    if (ptr < (unsigned char *)heap_start || ptr >= heap_top) {
+        return false;
+    }
+    
+    // Must not be in the gap
+    if (is_in_gap(ptr)) {
+        return false;
+    }
+    
+    return true;
 }
 
 // ----------- List manipulation utilities ---------
@@ -148,7 +178,7 @@ static inline Block* get_block_from_payload(void *ptr) {
     return (Block*)((unsigned char*)ptr - offsetof(Block, payload));
 }
 
-// ---------------------------------------------------- 
+// ----------------------------------------------------
 
 // Set up the header and footer of the block
 static inline void setup_block(Block* b, size_t size, bool used) {

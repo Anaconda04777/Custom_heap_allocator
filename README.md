@@ -51,6 +51,8 @@ The header files are the following ones:
     Manages all the mmap related functions (i.e., allocation and deallocation with `mmap` and `munmap`).
 - **Utils.h**:
     Includes all the functions and wrappers used around the program to make the code cleaner and more maintainable.
+- **Debug_utilities.h**:
+    Includes functions useful to analyze and debug the allocator
 - **Heap_allocator.h**:
     Implements the body of `my_malloc` and `my_free`. It's the public interface that the user has to import in order to use the dynamic allocator.
 - **Allocator.c**:
@@ -157,56 +159,348 @@ The functioning of `my_free` is straightforward:
 4. The `coalesce` function is performed to try to merge the block with its neighbors.
 5. The block is inserted into the segregated lists.
 
-## Test report
+## Test suit
 
-In `allocator.c` script, tests are performed to check the correctness and expected behavior of the dynamic allocator. Five tests are performed in the script:
+In `allocator.c` script, tests are performed to check the correctness and expected behavior of the dynamic allocator.
+The script implements a complete test suit with which the various functionalities offered by the allocator can be tested.
 
-1. **Test Basic Allocation**: tests a simple allocate-write-deallocate flow
-2. **Test Reuse**: tests if a block that is allocated, and then freed, would be reused another time when a data of the same size is requested
-3. **Test Coalescing**: tests if the key feature of the coalescing works properly. 3 blocks of the same type are allocated and then freed one after the other. The expected behave is to have then just single bigger block in memory which is reused by the last bigger allocation
-4. **Test Large Allocation**: tests if a large allocation, which would trigger the mmap allocator, works properly in the allocate-write-free flow
-5. **Test Many Allocations**: tests the correct functioning of sbrk by allocating a huge number of blocks which total size would exceed the default size of the heap
+- The suite includes 7 different test categories that can be run individually with custom parameters or in groups with default parameters.
 
-**Bonus test (real use case test)**: The allocator is tested also in a real script which implements hash table data structure. The script has been taken from a real repository on github and all the instances of `malloc` and `free` were changed with the ones of the project.
-The test showed that the data structure works properly also with the custom allocator.
+- With the `print_memory` utility, an overview of the current memory state can be observed to help the debugging.
 
-### Results of the tests
+**Running a Single Test**
 
+When running a single test, its parameter can be customized:
+
+```bash
+./allocator <test_name> [param1=value] [param2=value] ...
 ```
-=== Dynamic Allocator Test ===
 
-=== Test 1: Base allocation ===
-p1 allocated (32 bytes): 0x57d995f360a8
-p2 allocated (64 bytes): 0x57d995f360d8
-p3 allocated (128 bytes): 0x57d995f36128
-Writing in blocks test passed 
+**Running Multiple Tests**
 
-Deallocation test passed
+When running multiple tests, only default parameters can be used.
 
-=== Test 2: Reuse of free blocks ===
-First allocation (64 bytes): 0x57d995f360a8
-Free p1
-Second allocation (64 bytes): 0x57d995f360a8
-SUCCESS: a block of the same reused correctly!
+```bash
+./allocator <test_name1> <test_name2> <test_name3> ...
+```
 
-=== Test 3: Coalescing ===
-Allocating 3 contiguous blocks
-p1: 0x57d995f360a8, p2: 0x57d995f360c8, p3: 0x57d995f360e8
-Freed all of 3 blocks (coalescing should merge them)
-Allocating a more bigger block (sizeof(int)*3): 0x57d995f360a8
+**Print Current Memory State**
 
-p4[0] = 10
-p4[1] = 20
-p4[2] = 30
-=== Test 4: Use of mmap on bigger allocations ===
-Allocating (256KB) with mmap: 0x70310a1a5008
-Writing on the bigger block test passed
-Deallocating a bigger block test passed
+When running single or multiple tests, the `verbose` option can be added to print the current dynamic memory (and mmap allocated blocks) state.
 
-=== Test 5: Test many allocations ===
-Allocating 70 blocks
-Freed every even blocks
-Freed every odd blocks
+```bash
+./allocator <test_name> ... verbose
+```
 
+### Available Tests
+
+#### 1. **Choose the right allocation method: `mmap_threshold`**
+
+
+---
+
+**Description:** Verifies that allocations below, at, and above the mmap threshold are handled correctly.
+
+**Parameters:**
+
+- `size_below=<bytes>` (default: 65536)
+- `size_at=<bytes>` (default: 131072)
+- `size_above=<bytes>` (default: 262144)
+
+**Example:**
+```bash
+./allocator mmap_threshold
+./allocator mmap_threshold size_below=32768 size_above=524288
+```
+
+**Expected Behavior:**
+
+- Allocations below threshold should be placed in the heap (static or sbrk-extended)
+- Allocations at/above threshold ($\ge$ 128KB) should use mmap
+- All three allocations should succeed and return valid pointers
+- Memory should be writable (tested with memset)
+- When verbose mode is enabled, mmap blocks should appear in the "MMAP ALLOCATED BLOCKS" section
+
+**Failure Conditions:**
+
+- **Assertion failure** if any allocation returns NULL
+- **Segmentation fault** if memory cannot be written to
+- **Incorrect allocation method** if blocks above threshold don't appear in mmap section (with verbose)
+- **Memory exhaustion** if system cannot provide requested memory
+
+#### 2. **Correct size block: `alignment`**
+
+---
+
+**Description:** Allocates blocks of different sizes and verifies proper alignment. Auto-detects the actual alignment requirement from the allocator.
+
+**Parameters:**
+
+- `sizes=<size1,size2,...>` (default: 1,2,3,7,8,15,16,24,64,256)
+
+**Example:**
+```bash
+./allocator alignment
+./allocator alignment sizes=4,10,32,57,100
+```
+
+**Expected Behavior:**
+
+- First allocation detects the allocator's alignment (typically 8 bytes on 64-bit systems)
+- All subsequent allocations should return addresses aligned to this boundary
+- Each returned pointer should be divisible by the detected alignment
+- Memory should be writable for all allocations
+- Test prints "YES" for each aligned allocation
+
+**Failure Conditions:**
+
+- **Assertion failure** if any allocation returns NULL
+- **Assertion failure** if any pointer address is not properly aligned (address % alignment $\not =$ 0)
+- This indicates a bug in the allocator's alignment logic
+- **Segmentation fault** if unaligned memory access causes hardware exceptions
+
+#### 3. **Split algorithm and block reuse test: `split_reuse`**
+
+---
+
+**Description:** Allocates an initial block, frees it, then allocates a smaller block to test if the allocator can split the original block and reuse it.
+
+**Parameters:**
+
+- `initial=<bytes>` (default: 256)
+- `realloc=<bytes>` (default: 96)
+
+**Example:**
+```bash
+./allocator split_reuse
+./allocator split_reuse initial=512 realloc=256
+```
+
+**Expected Behavior:**
+
+- Initial allocation succeeds and returns a valid pointer
+- After freeing, the block should be added to the appropriate segregated free list
+- Second (smaller) allocation should ideally reuse the same address (block splitting)
+- If addresses match: optimal reuse with splitting
+- If addresses differ: allocator may have chosen a different free block (still valid)
+- Both allocations should be writable
+
+**Failure Conditions:**
+
+- **Assertion failure** if either allocation returns NULL
+- **Memory corruption** if the allocator doesn't properly split/manage block metadata
+- **Segmentation fault** if freed memory is not properly marked as available
+
+#### 4. **Test merging algorithm: `coalescing`**
+
+---
+
+**Description:** Allocates N contiguous blocks, frees them in different orders, and then attempts to allocate a block of the combined size to verify coalescing.
+
+**Parameters:**
+
+- `block_size=<bytes>` (default: 32)
+- `num_blocks=<count>` (default: 5)
+- `order=<0|1|2>` (0=FIFO, 1=LIFO, 2=alternating, default: 1)
+
+**Example:**
+```bash
+./allocator coalescing
+./allocator coalescing block_size=64 num_blocks=10 order=0
+```
+
+**Expected Behavior:**
+
+- All N individual blocks allocate successfully in sequence
+- Blocks should be physically adjacent in memory (addresses increment by block_size)
+- After freeing all blocks, the coalescing algorithm should merge adjacent free blocks
+- Final allocation of (block_size × num_blocks) should succeed
+- Successful coalescing allows a single large contiguous allocation where N small blocks were
+- Split should be expected with enough allocated blocks due to the absorption of the header and footer during the coalescing
+- Memory should be writable after the merged allocation
+
+**Failure Conditions:**
+
+- **Assertion failure** if any individual allocation fails
+- **Assertion failure** if the final merged allocation fails (indicates coalescing didn't work)
+- **Fragmentation issue** if allocator cannot provide the full merged size
+- With verbose mode: check free lists to see if blocks were properly merged
+- LIFO order typically tests backward coalescing, FIFO tests forward coalescing
+
+#### 5. **Efficiency memory space management: `fragmentation`**
+
+---
+
+**Description:** Creates fragmented memory by alternating large and small allocations, then frees in patterns to create gaps and tests handling of medium-sized allocations.
+
+**Parameters:**
+
+- `large=<bytes>` (default: 512)
+- `small=<bytes>` (default: 64)
+- `medium=<bytes>` (default: 256)
+- `iterations=<count>` (default: 10)
+
+**Example:**
+```bash
+./allocator fragmentation
+./allocator fragmentation large=1024 small=128 iterations=5
+```
+
+**Expected Behavior:**
+
+- Each iteration allocates: large block, small block, and medium block (medium block are immediately freed)
+- After all iterations: memory contains alternating pattern of large and small blocks with gaps
+- Freeing all large blocks creates non-contiguous gaps in memory
+- Medium-sized allocations should succeed by fitting into freed gaps or using new space
+- Tests allocator's ability to handle fragmented memory and find suitable blocks
+
+**Failure Conditions:**
+
+- **Assertion failure** if any allocation fails during the test
+- **Memory exhaustion** if heap cannot grow to accommodate fragmented layout
+- **Fragmentation deadlock** if freed gaps cannot be reused and new allocations fail
+- With verbose mode: observe segregated lists to see fragmentation impact
+
+#### 6. **Behavior on huge number of allocations: `stress_small`**
+
+---
+
+**Description:** Allocates many small blocks, frees a percentage of them, re-allocates the freed space, and ensures no crashes or memory errors occur.
+
+**Parameters:**
+
+- `size=<bytes>` (default: 32)
+- `count=<number>` (default: 200)
+- `free_pct=<percent>` (default: 50)
+
+**Example:**
+```bash
+./allocator stress_small
+./allocator stress_small count=100 free_pct=30
+```
+
+**Expected Behavior:**
+
+- All initial allocations (count) should succeed
+- Freeing operations target every other block (alternating pattern)
+- Re-allocation should succeed by reusing freed blocks from segregated lists
+- All memory should remain writable throughout
+- Final deallocation should free all remaining blocks without errors
+
+**Failure Conditions:**
+
+- **Assertion failure** if any of the many allocations fails
+- **Memory exhaustion** if heap cannot accommodate requested count
+- **Segmentation fault** if metadata corruption occurs during intensive alloc/free cycles
+- **Double-free detection** if freeing logic has bugs (may crash)
+- **Memory leak detection** if blocks aren't properly tracked (not directly tested)
+- With verbose mode: segregated lists should show freed blocks available for reuse
+
+#### 7. **Testing mmap: `large_blocks`**
+
+---
+
+**Description:** Allocates several large blocks that trigger mmap, frees them in different orders, and verifies proper handling.
+
+**Parameters:**
+
+- `num=<count>` (default: 5)
+- `order=<0|1|2>` (0=FIFO, 1=LIFO, 2=random, default: 1)
+
+**Example:**
+```bash
+./allocator large_blocks
+./allocator large_blocks num=10 order=2
+```
+
+**Expected Behavior:**
+
+- All large allocations (256KB, 512KB, 1MB, 2MB, 512KB by default) should use mmap
+- Each allocation returns a page-aligned pointer from the OS
+- Blocks are tracked separately from the main heap
+- Memory should be writable (tested with `memset`)
+- Deallocation order tests robustness: FIFO, LIFO, or alternating pattern
+- With verbose mode: blocks appear in "MMAP ALLOCATED BLOCKS" section
+- After freeing: blocks should disappear from mmap tracking list
+
+**Failure Conditions:**
+
+- **Assertion failure** if any mmap allocation fails
+- **System memory exhaustion** if OS cannot provide requested large pages
+- **munmap failure** if deallocation fails (rare, indicates serious system issue)
+- **Memory leak** if mmap blocks aren't properly tracked and freed
+- **Segmentation fault** if mmap metadata corruption occurs
+- **Virtual memory limits** if process exceeds ulimit -v restrictions
+
+### Usage Examples
+
+#### Single Test with Default Parameters
+```bash
+./allocator coalescing
+```
+
+#### Single Test with Custom Parameters
+```bash
+./allocator fragmentation large=1024 iterations=20
+./allocator stress_small count=500 free_pct=25
+./allocator coalescing block_size=256 num_blocks=15 order=2
+```
+
+#### Multiple Tests (Defaults Only)
+```bash
+./allocator alignment coalescing split_reuse
+./allocator fragmentation stress_small
+```
+
+#### Help
+```bash
+./allocator -h
+./allocator --help
+```
+
+### Test Output Format
+
+Each test produces structured output:
+
+1. **Header:** Test name and parameters used
+2. **Steps:** Detailed execution steps (allocations, frees, etc.)
+3. **Addresses:** Memory addresses for verification
+4. **Results:** Success/failure of assertions
+5. **Status:** "Test PASSED" or error message
+
+Example output:
+```
+=== Test: coalescing ===
+Parameters: block_size=32, num_blocks=5, order=1
+
+Step 1: Allocating 5 blocks of 32 bytes...
+  Block 0: 0x7f1234567890
+  Block 1: 0x7f1234567920
+  ...
+```
+
+### Default Parameters Summary
+
+| Test | Key Default Parameters |
+|------|----------------------|
+| mmap_threshold | size_below=64KB, size_at=128KB, size_above=256KB |
+| alignment | sizes=<1,2,3,7,8,15,16,24,64,256> |
+| split_reuse | initial=256B, realloc=96B |
+| coalescing | block_size=32B, num_blocks=5, order=LIFO |
+| fragmentation | large=512B, small=64B, medium=256B, iter=10 |
+| stress_small | size=32B, count=200, free_pct=50% |
+| large_blocks | num=5, order=LIFO |
+
+### Notes
+
+- Parameters are case-sensitive
+- When multiple tests are specified, all parameters are ignored (defaults are used)
+- The test suite includes assertions; any failed assertion will cause the program to exit with an error
+- Memory addresses shown in output are system-dependent and may vary between runs
+- Some tests (like `large_blocks` and `mmap_threshold`) may be sensitive to system memory availability
+
+### Bonus test (real use case test)
+The allocator is tested also in a real script which implements hash table data structure. The script has been taken from a real repository on github and all the instances of `malloc` and `free` were changed with the ones of the project.
+The test showed that the data structure works properly also with the custom allocator.
 === All tests passed successfully ===
 ```

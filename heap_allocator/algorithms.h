@@ -7,6 +7,7 @@
 #include "utils.h"
 #include <unistd.h>
 #include <sys/mman.h>
+#include <assert.h>
 
 
 /*
@@ -36,7 +37,7 @@
     The problem with allocating this way is that most of the time the memory
     reserved by sbrk will not be contiguous with our already-allocated heap. Therefore,
     the algorithm fills the gap by creating a new block between the last allocated block 
-    in the heap and the new address. 
+    in the heap and the new address.
     Note that since the heap is allocated in the BSS section, the new address returned by
     sbrk will always be higher than the end of the heap. This happens because the sbrk system call
     manages a kernel-level pointer called "program break" which indicates the end of the data
@@ -89,29 +90,37 @@ static Block* coalesce(Block* block) {
     */
     // ---- Check and get the NEXT block ----
     Block *next_block = get_next_physical_block(block);
-    //Check if it's valid: if the next block crosses the boundaries of the allocated heap, 
-    // it would definitely be invalid. We check against heap_top because
-    // we only want to coalesce with blocks that are actually allocated/in use.
-    bool next_is_free = (unsigned char*)next_block < heap_top && !is_used(next_block);
+
+    bool next_is_free = false;
+
+    // Check if next block is valid:
+    // 1. Must be within heap bounds (before heap_top)
+    // 2. Must NOT be in the gap between static heap and sbrk memory
+    // 3. Must not be used
+    if (is_valid_heap_address(next_block)) {
+        next_is_free = !is_used(next_block);
+    }
 
     // ---- Check and get the PREVIOUS block ----
     Block *prev_block = NULL;
     bool prev_is_free = false;
 
-    //To avoid errors from accessing memory zones that could lead to a crash, we first
-    // should check if the current block that we are freeing is not the first of the heap
-    if (block != heap_start) {
-        //Now we check if the address of the footer is valid. This is done to make sure
-        // we are not taking the previous block from a zone between the old heap and
-        // the new space allocated by sbrk
-        Footer* prev_footer_addr = (Footer*)((unsigned char*)block - sizeof(Footer));
+    //Check if we're not at the start of the static heap or at the start of the
+    //  new allocated memory by sbrk
+    // We need to check both: not at heap_start AND not at gap_end (start of sbrk region)
+    bool at_region_start = ((unsigned char*)block == (unsigned char*)heap_start) ||
+                           (gap_end != NULL && (unsigned char*)block == gap_end);
 
-        //If the address of the footer is in the heap memory space, then it's a valid footer 
-        if ((unsigned char*)prev_footer_addr >= (unsigned char*)heap_start) {
+    if (!at_region_start) {
+        Footer* prev_footer_addr = (Footer*)((unsigned char*)block - sizeof(Footer));
+        
+        // Check also if the footer is in a valid heap memory (not in the gap)
+        if (is_valid_heap_address(prev_footer_addr)) {
+            
             prev_block = get_prev_physical_block(block);
             
-            //Then we check if the entire block is valid and not in use
-            if ((unsigned char*)prev_block >= (unsigned char*)heap_start && !is_used(prev_block)) {
+            // Verify the previous block is also in valid memory and not used
+            if (is_valid_heap_address(prev_block) && !is_used(prev_block)) {
                 prev_is_free = true;
             }
         }
@@ -129,7 +138,7 @@ static Block* coalesce(Block* block) {
 
     // --- Case 2: Merge with previous ---
     if (prev_is_free) {
-        remove_from_free_list(prev_block); 
+        remove_from_free_list(prev_block);
         // Increase the size of the current block by the size of the previous block 
         new_size += get_size(prev_block);
         // The address of the new block is the one of the previous block since
@@ -216,34 +225,36 @@ static void* sbrk_allocation(size_t total_size) {
     }
 
     /* Step 3) There may be a hole between the current heap size and the program break
-               set by sbrk. This can happen when the heap is not completely filled
-               and therefore there would be a gap between heap_top and the returned sbrk address.
-               In this case, we have to create a block of the size of the hole.
+               set by sbrk. This can happen when some other data are stored in the BSS
+               section after the end of the heap, and therefore there would be a gap
+               between heap_top and the returned sbrk address.
     */                     
-    if (request != heap_end) {        
-        // Recover the remaining space between the current used heap and the end of the
-        // previously allocated heap
+    if (request != heap_end) {
+        //First call to extend the memory will probably have a gap
+        assert(gap_start == NULL);
+        //Create a free block with remaining static heap space if possible
         size_t remaining = heap_end - heap_top;
         size_t needed_for_free_block = sizeof(Block) + sizeof(Footer);
         
-        // If there is enough space for a block, we allocate a block equal to the gap
         if (remaining >= needed_for_free_block) {
             Block *rest = (Block*)heap_top;
-            
             setup_block(rest, remaining, false);
-
             insert_into_free_list(rest);
+            
+            //Gap starts after this free block
+            gap_start = heap_end;
+        } else {
+            //Not enough space for a block, gap starts at heap_top
+            gap_start = heap_top;
         }
+        
+        gap_end = (unsigned char *)request;
 
-        // The heap pointers are moved to fit the new memory space
+        //Move the heap pointers to fit the new memory space
         heap_top = (unsigned char *)request;
-        // Note: sbrk returns the first address that can be used to allocate.
-        // Because of this, we have to move the end by the size that we 
-        // allocated with sbrk.
         heap_end = (unsigned char *)request + sbrk_size;
     } else {
-        // In the case where the address that sbrk returns is the same as the
-        // end of the current heap, we just update the end of the heap.
+        //Memory is contiguous, just extend heap_end
         heap_end += sbrk_size;
     }
 
