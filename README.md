@@ -4,7 +4,7 @@ Author: Giuseppe Didonna
 
 ## Project description
 
-The following program is a hybrid heap memory allocator written in the C programming language that simulates the dynamic memory management of a process in a modern operating system.
+The following program is a hybrid heap memory allocator written in C that simulates the dynamic memory management of a process in a modern operating system.
 
 This allocator provides an interface similar to the standard C memory allocation functions and manages a private heap region in user space. Memory allocation and deallocation are handled explicitly by the allocator, while additional memory is requested from the operating system only when necessary.
 
@@ -29,7 +29,7 @@ When memory is freed, the corresponding block is marked as available and inserte
 
 ## Project structure
 
-The project is composed of 5 header files and one C script file which is the entry point of the program with all the tests.
+The project is composed of 6 header files and one C script file which is the entry point of the program with all the tests.
 
 The header files are the following ones:
 
@@ -67,8 +67,7 @@ The header files are the following ones:
 ### `typedef struct Block`
 
 It's the base of our implementation; we use it to allocate data in the heap. Each data item is stored in a block which resides in the heap. In this implementation, a block has 5 attributes:
-size, is_used flag, pointers to the previous and next block in the doubly linked list (for the segregated list), and footer. As we can see, the actual object, as defined, has only the header and the pointers for the doubly linked list. The reason is that the size and is_used flag are compressed in 
-the header through a bitmask in which the last three bits are used as flags to indicate whether the block is in use and whether the block was allocated with mmap. Furthermore, the block uses a special C data structure called union:
+`size`, `is_used` flag, pointers to the previous and next block in the doubly linked list (for the segregated list), and footer. As we can see, the actual object, as defined, has only the header and the pointers for the doubly linked list. The reason is that the size and `is_used` flag are compressed in the header through a bitmask in which the last three bits are used as flags to indicate whether the block is in use and whether the block was allocated with mmap. Furthermore, the block uses a special C data structure called union:
 the union allows storing two different data types in the same memory space, overlapping them. When a block is free (i.e., it doesn't store any data,  and therefore has to be placed in the segregated list), the memory zone will store the two pointers needed by the segregated list (which, remember, is a doubly linked list). When the block contains some data, it will just store the payload in that area (a pointer to the memory area where the data are stored). The size of this section is 16 bytes (8 + 8) because the compiler reserves space based on the largest data type it could store. Finally, we have the footer, which as we can see is not stored in the struct because we cannot know in advance where it will be stored in memory (given that it's after the payload). Its purpose is to make it easy to find the previous adjacent block's header in the heap. We need this information to implement coalescing in $O(1)$.
 
 ![Block example](images/block_example.png "Block example")
@@ -91,18 +90,24 @@ typedef struct Block {
 
 ### `unsigned char heap[HEAP_TOTAL_SIZE]`
 
-Is an array of bytes that represents the address space of our heap. To operate on the heap, we need to know at which address it starts (heap_start), the current top (heap_top) since we need to know where the unallocated memory starts, and at which address it ends (heap_end) since we need to know when to extend the heap space through sbrk.
+Is an array of bytes that represents the address space of our heap. To operate on the heap, we need to know at which address it starts (`heap_start`), the current top (`heap_top`) since we need to know where the unallocated memory starts, and at which address it ends (`heap_end`) since we need to know when to extend the heap space through sbrk.
+In addition, we have two pointers to the start (`gap_start`) and end (`gap_end`) of the gap between the final address reserved to the heap array and the start of the new address spaces allocated with `sbrk`.
 
 #### Heap support pointers
 
 ``` C
 // Points to the top of the allocated portion of the heap
-static unsigned char *heap_top = heap; 
+static unsigned char *heap_top = heap;
 //Pointer to the end of the heap array
 static unsigned char *heap_end = heap + HEAP_TOTAL_SIZE;
 
 // Pointer to the first block, which starts at the beginning of the heap
 static Block* heap_start = (Block *)heap;
+
+// Start of the gap (end of static heap usage)
+static unsigned char *gap_start = NULL;
+// End of the gap (start of sbrk memory)
+static unsigned char *gap_end = NULL;
 ```
 
 ### `Block *segregatedLists[NUM_LISTS]`
@@ -113,13 +118,13 @@ It's an array of doubly linked lists that keeps track of the current free blocks
 
 ### `size_t align(size_t n)`
 
-Aligns the block of memory based on the hardware architecture. In short, it adds padding to the size of the block so that it will be a multiple of the machine word (on a x64 machine, they will be multiples of 8). By doing so, not only is aligned memory access more efficient, but we are also sure that the last 3 least significant bits are always free (since the number will be a multiple of 8).
+Aligns the block of memory based on the hardware architecture. In short, it adds padding to the size of the block so that it will be a multiple of the machine word (on a x64 machine, they will be multiples of 8). By doing so, not only access to aligned memory is more efficient, but we are also sure that the last 3 least significant bits are always free (since the number will be a multiple of 8).
 
 ### `Block* coalesce(Block* block)`
 
 Is a technique that reduces memory fragmentation. Basically, the algorithm works by merging two adjacent blocks when we are freeing one of them.
 
-- **Step 1)** Check if the adjacent blocks are valid and not in use. Besides checking if the blocks are not in use, we have to verify that the next block we are calculating is valid (i.e., it doesn't extend beyond the current heap or before it). Since the heap array is stored in the BSS section, it can happen that after the heap is extended and the program break has moved forward, some data from other BSS-allocated variables can be present between the old heap and the new space. In this case, the physical calculation of the blocks through the footer will fail if we don't properly validate the memory zone we calculated.
+- **Step 1)** Check if the adjacent blocks are valid and not in use. Besides checking if the blocks are not in use, we have to verify that the next and previous block we are calculating are valid (i.e., they don't extend beyond the current heap or before it). Since the heap array is stored in the BSS section, it can happen that after the heap is extended and the program break has moved forward, some data from other BSS-allocated variables can be present between the old heap and the new space. In this case, the physical calculation of the blocks through the footer will fail if we don't properly validate the memory zone we calculated.
 
 - **Step 2)** Generate the new merged block
 
@@ -135,7 +140,7 @@ Splits the block into two different blocks, one of the exact size that the alloc
 
 ### `void* sbrk_allocation(size_t total_size)`
 
-It's the algorithm that allows extension of our heap memory. The problem with allocating this way is that most of the time the memory reserved by sbrk will not be contiguous with our already-allocated heap. Therefore, the algorithm fills the gap by creating a new block between the last allocated block in the heap and the new address. Note that since the heap is allocated in the BSS section, the new address returned by sbrk will always be higher than the end of the heap. This happens because the sbrk system call manages a kernel-level pointer called "program break" which indicates the end of the data zone managed by the operating system. When we call the `sbrk()` syscall, the program break will always grow toward higher addresses.
+It's the algorithm that allows extension of our heap memory. The problem with allocating this way is that most of the time the memory reserved by sbrk will not be contiguous with our already-allocated heap. Therefore, the algorithm save the position in which the gab starts and end. Note that since the heap is allocated in the BSS section, the new address returned by sbrk will always be higher than the end of the heap. This happens because the sbrk system call manages a kernel-level pointer called "program break" which indicates the end of the data zone managed by the operating system. When we call the `sbrk()` syscall, the program break will always grow toward higher addresses.
 
 ![Sbrk allocation](images/sbrk_allocation.png "Sbrk allocation")
 

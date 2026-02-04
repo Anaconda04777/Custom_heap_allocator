@@ -85,7 +85,6 @@ typedef size_t Footer;
 // the last 3 bits of a header to get just the size.
 #define SIZE_MASK (~(sizeof(word_t) - 1))
 
-// Definition of the Block structure
 typedef struct Block {
     size_t header;
 
@@ -114,8 +113,6 @@ static Block* heap_start = (Block *)heap;
 // Array of segregated free lists
 static Block *segregatedLists[NUM_LISTS] = { NULL };
 
-// Gap tracking pointers for non-contiguous sbrk allocations
-// These track the memory gap between the static heap and sbrk-allocated memory
 static unsigned char *gap_start = NULL;  // Start of the gap (end of static heap usage)
 static unsigned char *gap_end = NULL;    // End of the gap (start of sbrk memory)
 

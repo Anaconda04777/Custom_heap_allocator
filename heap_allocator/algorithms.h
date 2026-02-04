@@ -33,16 +33,14 @@
     avoid internal fragmentation caused by first-fit when it chooses a block much larger 
     than what the allocation needs.
 
-    - Sbrk Allocation: it's the algorithm that allows extension of our heap memory.
-    The problem with allocating this way is that most of the time the memory
-    reserved by sbrk will not be contiguous with our already-allocated heap. Therefore,
-    the algorithm fills the gap by creating a new block between the last allocated block 
-    in the heap and the new address.
-    Note that since the heap is allocated in the BSS section, the new address returned by
-    sbrk will always be higher than the end of the heap. This happens because the sbrk system call
-    manages a kernel-level pointer called "program break" which indicates the end of the data
-    zone managed by the operating system. When we call the sbrk() syscall, the program break
-    will always grow toward higher addresses.
+    - Sbrk Allocation: It's the algorithm that allows extension of our heap memory.
+    The problem with allocating this way is that most of the time the memory reserved by sbrk 
+    will not be contiguous with our already-allocated heap. Therefore, the algorithm save the 
+    position in which the gab starts and end. Note that since the heap 
+    is allocated in the BSS section, the new address returned by sbrk will always be higher than the end of the heap. 
+    This happens because the sbrk system call manages a kernel-level pointer called "program break" 
+    which indicates the end of the data zone managed by the operating system. When we call the `sbrk()` syscall, 
+    the program break will always grow toward higher addresses.
 
     Higher addresses   +-------------------+
                        |       Stack       |
@@ -69,8 +67,6 @@
 */
 
 
-// Align the block of memory based on the hardware architecture with a bit operation:
-// This method ensures rounding up the number to the next closest multiple of the word size
 static inline size_t align(size_t n) {
     return (n + sizeof(word_t) - 1) & ~(sizeof(word_t) - 1);
 }
@@ -88,20 +84,14 @@ static Block* coalesce(Block* block) {
         the blocks through the footer will fail if we don't properly validate
         the memory zone we calculated.
     */
-    // ---- Check and get the NEXT block ----
     Block *next_block = get_next_physical_block(block);
 
     bool next_is_free = false;
 
-    // Check if next block is valid:
-    // 1. Must be within heap bounds (before heap_top)
-    // 2. Must NOT be in the gap between static heap and sbrk memory
-    // 3. Must not be used
     if (is_valid_heap_address(next_block)) {
         next_is_free = !is_used(next_block);
     }
 
-    // ---- Check and get the PREVIOUS block ----
     Block *prev_block = NULL;
     bool prev_is_free = false;
 
@@ -119,7 +109,6 @@ static Block* coalesce(Block* block) {
             
             prev_block = get_prev_physical_block(block);
             
-            // Verify the previous block is also in valid memory and not used
             if (is_valid_heap_address(prev_block) && !is_used(prev_block)) {
                 prev_is_free = true;
             }
@@ -132,18 +121,16 @@ static Block* coalesce(Block* block) {
     // --- Case 1: Merge with next ---
     if (next_is_free) {
         remove_from_free_list(next_block);
-        // Increase the size of the current block by the size of the next block 
         new_size += get_size(next_block);
     }
 
     // --- Case 2: Merge with previous ---
     if (prev_is_free) {
         remove_from_free_list(prev_block);
-        // Increase the size of the current block by the size of the previous block 
         new_size += get_size(prev_block);
         // The address of the new block is the one of the previous block since
         // it comes first in terms of addresses
-        block = prev_block; 
+        block = prev_block;
     }
     
     setup_block(block, new_size, false);
@@ -153,10 +140,6 @@ static Block* coalesce(Block* block) {
 
 static Block* first_fit(size_t size) {
     int start_idx = get_list_index(size);
-    
-    // Because of splitting and coalescing, blocks can 
-    // "migrate" across different lists. For this reason, we
-    // should iterate through all the lists after the target one
 
     for (int i = start_idx; i < NUM_LISTS; i++) {
         Block *current = segregatedLists[i];
@@ -177,18 +160,15 @@ static void split_block(Block *block, size_t needed_size) {
     size_t current_size = get_size(block);
     size_t min_block_size = sizeof(Block) + sizeof(Footer);
     
-    // Check if the current size of the block we are analyzing 
-    // is sufficient to contain the needed space for the data
-    // we want to allocate + the basic information that a block needs.
-    // Note: we also handle the edge case where 
+    //Note: we also handle the edge case where
     // current_size == needed_size + min_block_size. We do this
-    // to avoid creating blocks of size == min_block_size, 
-    // which would lead to internal fragmentation.
+    // to avoid creating blocks of size == min_block_size,
+    // which would lead to fragmentation.
     if (current_size >= needed_size + min_block_size) {
         
         setup_block(block, needed_size, true);
         
-        // Create a new block with the remaining space.
+        //Create a new block with the remaining space.
         // First, we calculate where the second block starts.
         // It will start at the end of the new block.
         Block *new_block = (Block*)((unsigned char*)block + needed_size);
@@ -204,12 +184,9 @@ static void* sbrk_allocation(size_t total_size) {
     /* Step 1) Calculate how much to enlarge the heap
                 Since sbrk works with pages, we will calculate 
                 how many pages we need to enlarge our heap 
-    */  
-    // Calculate page size depending on the hardware
+    */
     size_t page_size = (size_t)get_page_size();
 
-    // If the amount to add to the heap is less than a page, it will
-    // enlarge by the size of a single page
     size_t size_to_alloc = total_size;
     if (size_to_alloc < page_size) {
         size_to_alloc = page_size;
@@ -221,16 +198,15 @@ static void* sbrk_allocation(size_t total_size) {
     // Step 2) Call sbrk
     void *request = sbrk(sbrk_size);
     if (request == (void*)-1) {
-        return NULL; // if the request is -1, we have an Out Of Memory error
+        return NULL; // Out Of Memory error
     }
 
     /* Step 3) There may be a hole between the current heap size and the program break
                set by sbrk. This can happen when some other data are stored in the BSS
                section after the end of the heap, and therefore there would be a gap
                between heap_top and the returned sbrk address.
-    */                     
+    */
     if (request != heap_end) {
-        //First call to extend the memory will probably have a gap
         assert(gap_start == NULL);
         //Create a free block with remaining static heap space if possible
         size_t remaining = heap_end - heap_top;
@@ -241,10 +217,10 @@ static void* sbrk_allocation(size_t total_size) {
             setup_block(rest, remaining, false);
             insert_into_free_list(rest);
             
-            //Gap starts after this free block
             gap_start = heap_end;
         } else {
-            //Not enough space for a block, gap starts at heap_top
+            //TODO: modify the code to convert the remaining space between the gap and the
+            // heap_top into a free block
             gap_start = heap_top;
         }
         
@@ -258,8 +234,6 @@ static void* sbrk_allocation(size_t total_size) {
         heap_end += sbrk_size;
     }
 
-    // When we finish setting up the new space, we can allocate a new
-    // block in it to store the requested data.
     Block* block = (Block*)heap_top;
     
     setup_block(block, total_size, true);

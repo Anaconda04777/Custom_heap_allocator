@@ -38,13 +38,11 @@
 void* my_malloc(size_t size) {
     if (size == 0) return NULL;
     
-    // Get the aligned size of the data
     size_t aligned_size = align(size);
     // Calculate total size which is Header + Payload + Footer
     size_t total_size = sizeof(size_t) + aligned_size + sizeof(size_t);
     
-    //Note: size of block includes also the minimum space reserved for the pointers
-    size_t min_block_size = sizeof(Block) + sizeof(size_t); 
+    size_t min_block_size = sizeof(Block) + sizeof(size_t);
     // The total size can't be less than the minimum size (header + footer)
     if (total_size < min_block_size) total_size = min_block_size;
 
@@ -55,14 +53,11 @@ void* my_malloc(size_t size) {
 
     // ------------- (1) Standard allocation ------------
 
-    // A free appropriate block is found through first-fit policy
     Block *block = first_fit(total_size);
     
-    // If a block was found...
     if (block != NULL) {
         remove_from_free_list(block);
         
-        // Splitting of the block is performed to avoid internal fragmentation
         split_block(block, total_size);
         
         set_used(block, true);
@@ -71,7 +66,7 @@ void* my_malloc(size_t size) {
         Footer *footer = get_footer(block);
         *footer = block->header;
 
-        return (void*)block->payload; 
+        return (void*)block->payload;
     }
 
     // If there are no blocks available for that data, a new block is created
@@ -81,26 +76,21 @@ void* my_malloc(size_t size) {
         
         setup_block(block, total_size, true);
 
-        // The top of the heap is moved
         heap_top += total_size;
         
         return (void*)block->payload;
     }
 
     // ------------ (2) Sbrk allocation ---------------
-    // The payload pointer is directly returned from the allocation
-    //printf("Start enlarge memory\n\n");
+    // The payload pointer is directly returned by the sbrk
     return sbrk_allocation(total_size);
 }
 
-// Deallocates dynamic memory
 void my_free(void* ptr) {
     if (!ptr) return;
 
-    // Get the block from the payload
     Block *block = get_block_from_payload(ptr);
     
-    // If the block was allocated with mmap, munmap is performed
     if (is_mmap(block)) {
         mmap_free(block);
         return;
@@ -112,10 +102,8 @@ void my_free(void* ptr) {
     Footer *footer = get_footer(block);
     *footer = block->header;
 
-    // Coalesce is performed and the new merged block is returned 
-    block = coalesce(block); 
+    block = coalesce(block);
 
-    // The new free block is inserted into the segregated list
     insert_into_free_list(block);
 }
 
